@@ -1,5 +1,3 @@
-#Making UNet Model
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -26,23 +24,25 @@ class SparseAutoencoder(nn.Module):
         self.sparsity_lambda = sparsity_lambda
         self.sparsity_target = sparsity_target
 
-        # Modified encoder/decoder for 2D input
+        # Modified encoder/decoder with activation controls
         self.encoder = nn.Sequential(
             nn.Conv2d(in_channels, in_channels, 1),
             nn.ReLU(),
-            nn.Conv2d(in_channels, in_channels, 1)
+            nn.Conv2d(in_channels, in_channels, 1),
+            nn.Sigmoid()  # Add sigmoid to bound values between 0 and 1
         )
         
         self.decoder = nn.Sequential(
             nn.Conv2d(in_channels, in_channels, 1),
             nn.ReLU(),
-            nn.Conv2d(in_channels, in_channels, 1)
+            nn.Conv2d(in_channels, in_channels, 1),
+            nn.Sigmoid()  # Add sigmoid for bounded output
         )
 
-        # Initialize weights
+        # Initialize weights with smaller values
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
-                nn.init.xavier_uniform_(m.weight)
+                nn.init.xavier_uniform_(m.weight, gain=0.1)
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
 
@@ -55,16 +55,21 @@ class SparseAutoencoder(nn.Module):
     def sparsity_penalty(self, encoded):
         # Calculate mean activation across all dimensions except channels
         rho_hat = torch.mean(encoded, dim=[0, 2, 3])
-        rho = torch.tensor(self.sparsity_target).to(encoded.device)
+        rho = torch.tensor(self.sparsity_target, device=encoded.device)
         
-        
-        epsilon = 1e-8
+        # More aggressive clamping for numerical stability
+        epsilon = 1e-7
         rho_hat = torch.clamp(rho_hat, min=epsilon, max=1-epsilon)
         
+        # Modified KL divergence calculation with better numerical stability
+        kl_div = rho * torch.log((rho + epsilon)/(rho_hat + epsilon)) + \
+                 (1-rho) * torch.log((1-rho + epsilon)/(1-rho_hat + epsilon))
         
-        kl_div = rho * torch.log(rho/rho_hat) + (1-rho) * torch.log((1-rho)/(1-rho_hat))
-        return self.sparsity_lambda * torch.sum(kl_div)
-
+        # Clamp the loss to prevent extremely large values
+        kl_div = torch.clamp(kl_div, max=100.0)
+        
+        return self.sparsity_lambda * torch.mean(kl_div)  
+    
 class UNET(nn.Module):
     def __init__(self, in_channels=3, out_channels=1, features=[64, 128, 256, 512], sparsity_target=0.05, beta=1e-3):
         super(UNET, self).__init__()
